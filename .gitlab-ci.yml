@@ -1,0 +1,87 @@
+image: myregistry/docker-builder:latest
+
+variables:
+ dockerTag: '$CI_BUILD_REF'
+ DOCKER_REPO: myregistry
+ IMAGE_BASE_NAME: node-express
+ IMAGE: $DOCKER_REPO/$IMAGE_BASE_NAME:$CI_BUILD_REF
+ CONTAINER_NAME: 'node-express-app'
+ TARGET_DIR_STAGE: /srv/docker/staging/node-express
+ TARGET_DIR_PROD: /srv/docker/prod/node-express
+
+
+before_script:
+- echo $dockerTag
+- echo $DOCKER_CERT > cert.ca
+- eval $(ssh-agent -s)
+- ssh-add <(echo "$ID_RSA")
+- mkdir -p ~/.ssh
+- '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+
+build:
+ type: build
+ tags:
+ - docker-in-docker-pure-builder
+ script:
+ - docker build -t $IMAGE .
+ only:
+ - master
+ - production
+
+test:
+ type: test
+ variables:
+ ERROR_PATH: /tmp/node_pipeline_testresults
+ tags:
+ - docker-in-docker-builder
+ script:
+ # created directory for errored pages
+ - mkdir -p ${ERROR_PATH} || true
+ # start the previously built container
+ - docker run -d --add-host 'localhost localhost.localdomain localtest:127.0.0.1' -v ${ERROR_PATH}:/app/tests/_output --name ${CONTAINER_NAME} ${IMAGE}
+ # actually run tests
+ - docker exec ${CONTAINER_NAME} /app/runtests.sh
+ only:
+ - master
+ - production
+
+
+deploy_stage:
+ type: deploy
+ variables:
+ RELEASE_IMAGE: $DOCKER_REPO/$IMAGE_BASE_NAME:latest
+ tags:
+ - docker-in-docker-builder
+ script:
+ # tag the final image (the previous test image is built upon the test image file)
+ - docker tag $IMAGE $IMAGE
+ - docker --tlscacert cert.ca push $IMAGE
+ # tag the full image as lastest and push it
+ - docker tag $IMAGE $RELEASE_IMAGE
+ - docker --tlscacert cert.ca push $RELEASE_IMAGE
+ # deploy the images
+ - ssh user@buildserver.com "docker pull $RELEASE_IMAGE"
+ - ssh user@buildserver.com "sed -i "s/<IMAGE>/${RELEASE_IMAGE}/g" deployment.yaml"
+ - ssh user@buildserver.com "kubectl apply -f deployment.yaml"
+ only:
+ - master
+
+deploy_production:
+ type: deploy
+ variables:
+ RELEASE_IMAGE: $DOCKER_REPO/$IMAGE_BASE_NAME:stable
+ tags:
+ - docker-in-docker-builder
+ script:
+ # tag the final image (the previous test image is built upon the test image file)
+ - docker tag $IMAGE $IMAGE
+ - docker --tlscacert cert.ca push $IMAGE
+ # tag the full image as lastest and push it
+ - docker tag $IMAGE $RELEASE_IMAGE
+ - docker --tlscacert cert.ca push $RELEASE_IMAGE
+ # deploy the images
+ - ssh user@buildserver.com "docker pull $RELEASE_IMAGE"
+ - ssh user@buildserver.com "sed -i "s/<IMAGE>/${RELEASE_IMAGE}/g" deployment.yaml"
+ - ssh user@buildserver.com "kubectl apply -f deployment.yaml"
+ only:
+ - production
